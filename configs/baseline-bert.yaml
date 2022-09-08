@@ -4,13 +4,14 @@ test_file: 'data/testA_format.json'
 category: 36
 bert_config: 'output/bert-base-chinese' # or replace with just 'bert-base-chinese'
 
-batch_size_train: 16 
+batch_size_train: 8 
 batch_size_test: 256 
 
-r_drop: 0
+r_drop: 1
+as_softmax: 0.10
 warm_up: False
-optimizer: {opt: adamW, lr: 5e-5, weight_decay: 0.02}
-schedular: {sched: cosine, lr: 5e-5, epochs: 50, min_lr: 5e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
+optimizer: {opt: adamW, lr: 2e-5, weight_decay: 0.02}
+schedular: {sched: cosine, lr: 2e-5, epochs: 20, min_lr: 1e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
 
 # Evaluation Metrics
 metrics: ['accuracy','precision','recall','F-1']

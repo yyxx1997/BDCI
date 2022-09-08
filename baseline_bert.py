@@ -16,6 +16,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 ...
 from models.model_bert import BaselineBert
 from models.tokenization_bert import BertTokenizer
+from models.tricks import compute_kl_loss
 import utils
 from dataset import create_dataset, create_sampler, create_loader
 from scheduler import create_scheduler
@@ -30,6 +31,7 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
     logging_step = config['logging_step']
     output_dir = config['output_dir']
     metrics = config['metrics']
+    r_drop_rate = config['r_drop']
     best_scores = {}
     for metric in metrics:
         best_scores[metric] = -9999
@@ -56,18 +58,27 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
     start_time = time.time()
 
     for epoch in range(0, max_epoch):
-        model.train()
+        
         header = 'Train Epoch: [{}]'.format(epoch)
         if config.distributed:
             train_loader.sampler.set_epoch(epoch)
 
         for i, (caption, order, targets) in enumerate(metric_logger.log_every(train_loader, print_freq, header)):
-
+            model.train()
             targets = targets.to(device, non_blocking=True)
             text_inputs = tokenizer(caption, padding='longest', return_tensors="pt").to(device)
 
             with my_context():
-                loss = model(text_inputs, targets=targets, train=True)
+                output = model(text_inputs, targets=targets, train=True)
+                loss = output['loss']
+                prediction = output['prediction']
+                if r_drop_rate:
+                    output_hat = model(text_inputs, targets=targets, train=True)
+                    loss_hat = output_hat['loss']
+                    prediction_hat = output_hat['prediction']
+                    ce_loss = 0.5 * (loss + loss_hat)
+                    kl_loss = compute_kl_loss(prediction, prediction_hat)
+                    loss = ce_loss + r_drop_rate * kl_loss
                 loss = loss / K
                 loss.backward()
             if (i+1) % K == 0:
@@ -126,7 +137,7 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
         print("Averaged stats:", metric_logger.global_avg())
-        train_stats = {k: "{:.4f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}
+        train_stats = {k: "{:.6f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}
         val_stats, _ = evaluate(model, val_loader, tokenizer, device, config)
         test_stats, test_prediction = evaluate(model, test_loader, tokenizer, device, config)
 
@@ -149,7 +160,8 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
                 'epoch': epoch,
                 'step': total_step
             }
-            torch.save(save_obj, os.path.join(output_dir, 'checkpoint-epoch-{}.pth'.format(epoch)))
+            if config.save_every_epoch:
+                torch.save(save_obj, os.path.join(output_dir, 'checkpoint-epoch-{}.pth'.format(epoch)))
             for metric_name, score in best_scores.items():
                 assert metric_name in val_stats.keys(), "Metrics not exist..."
                 current_score = val_stats[metric_name]
@@ -183,7 +195,7 @@ def evaluate(model, data_loader, tokenizer, device, config):
     for i, (caption, order, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         order ,targets = order.to(device, non_blocking=True), targets.to(device, non_blocking=True)
         text_inputs = tokenizer(caption, padding='longest', return_tensors="pt").to(device)
-        prediction = model(text_inputs, train=False)
+        prediction = model(text_inputs, train=False)['prediction']
         prediction = utils.concat_all_gather(prediction, config['dist']).to('cpu')
         targets = utils.concat_all_gather(targets, config['dist']).to('cpu')
         order = utils.concat_all_gather(order, config['dist']).to('cpu')
@@ -225,7 +237,7 @@ def evaluate(model, data_loader, tokenizer, device, config):
 
 def data_prepare(config):
 
-    print("Creating dataset")
+    print("\n-------------\nCreating dataset\n-------------\n")
     datasets = create_dataset('normal', config)
     if config.distributed:
         num_tasks = utils.get_world_size()
@@ -245,7 +257,7 @@ def data_prepare(config):
 
 def model_prepare(config, device):
 
-    print("Creating model")
+    print("\n-------------\nCreating model\n-------------\n")
     model = BaselineBert(config=config, text_encoder=config.bert_config)
 
     if config.checkpoint:
@@ -260,7 +272,7 @@ def model_prepare(config, device):
     model_without_ddp = model
     if config.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[config.gpu])
+            model, device_ids=[config.gpu], broadcast_buffers=False)
         model_without_ddp = model.module
 
     return model, model_without_ddp
@@ -324,6 +336,7 @@ def parse_args():
                         help='device number of current process.') 
     parser.add_argument('--logging_step', default=1000, type=int) 
     parser.add_argument('--save_every_checkpoint', default=False, type=bool)
+    parser.add_argument('--save_every_epoch', default=False, type=bool)
     args = parser.parse_args()
     return args
 
