@@ -335,8 +335,8 @@ def parse_args():
     parser.add_argument('--local_rank', default=-1, type=int,
                         help='device number of current process.') 
     parser.add_argument('--logging_step', default=1000, type=int) 
-    parser.add_argument('--save_every_checkpoint', default=False, type=bool)
-    parser.add_argument('--save_every_epoch', default=False, type=bool)
+    parser.add_argument('--save_every_checkpoint', action='store_true')
+    parser.add_argument('--save_every_epoch', action='store_true')
     args = parser.parse_args()
     return args
 
