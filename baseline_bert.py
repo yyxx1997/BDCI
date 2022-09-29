@@ -1,15 +1,12 @@
 import argparse
 import os
 import ruamel.yaml as yaml
-import numpy as np
-import random
 import time
 import datetime
 import json
 from pathlib import Path
 import json
 import torch
-import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from contextlib import nullcontext
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -41,7 +38,6 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
     step_size = 100
     warmup_iterations = warmup_steps*step_size
     K = config.gradient_accumulation_steps
-    my_context = model.no_sync if config.local_rank != -1 and i % K != 0 else nullcontext
     total_train_batch_size = config['batch_size_train'] * K * config.world_size
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -63,11 +59,13 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
         if config.distributed:
             train_loader.sampler.set_epoch(epoch)
 
-        for i, (caption, order, targets) in enumerate(metric_logger.log_every(train_loader, print_freq, header)):
+        for i, (caption, _, targets) in enumerate(metric_logger.log_every(train_loader, print_freq, header)):
             model.train()
             targets = targets.to(device, non_blocking=True)
             text_inputs = tokenizer(caption, padding='longest', return_tensors="pt").to(device)
 
+            # Gradient Accumulation and Speed Up with No Sync: https://zhuanlan.zhihu.com/p/250471767
+            my_context = model.no_sync if config.local_rank != -1 and i % K != 0 else nullcontext
             with my_context():
                 output = model(text_inputs, targets=targets, train=True)
                 loss = output['loss']
@@ -81,7 +79,7 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
                     loss = ce_loss + r_drop_rate * kl_loss
                 loss = loss / K
                 loss.backward()
-            if (i+1) % K == 0:
+            if i % K == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -196,9 +194,9 @@ def evaluate(model, data_loader, tokenizer, device, config):
         order ,targets = order.to(device, non_blocking=True), targets.to(device, non_blocking=True)
         text_inputs = tokenizer(caption, padding='longest', return_tensors="pt").to(device)
         prediction = model(text_inputs, train=False)['prediction']
-        prediction = utils.concat_all_gather(prediction, config['dist']).to('cpu')
-        targets = utils.concat_all_gather(targets, config['dist']).to('cpu')
-        order = utils.concat_all_gather(order, config['dist']).to('cpu')
+        prediction = utils.concat_all_gather(prediction).to('cpu')
+        targets = utils.concat_all_gather(targets).to('cpu')
+        order = utils.concat_all_gather(order).to('cpu')
         predictions.append(prediction)
         goldens.append(targets)
         orders.append(order)
@@ -279,21 +277,15 @@ def model_prepare(config, device):
 
 
 def main(config):
-    utils.init_distributed_mode(config)
-    config['dist'] = config.distributed
-    device = torch.device(config.device)
-
+    
     # fix the seed for reproducibility
-    seed = config.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    cudnn.benchmark = True
+    utils.setup_seed(config.seed)
 
     #### Dataset ####
     train_loader, val_loader, test_loader = data_prepare(config)
 
     #### Model ####
+    device = torch.device(config.device)
     tokenizer = BertTokenizer.from_pretrained(config.bert_config)
     model, model_without_ddp = model_prepare(config, device)
 
@@ -322,7 +314,7 @@ def parse_args():
     parser.add_argument('--checkpoint', default='')
     parser.add_argument('--evaluate', action='store_true')
     parser.add_argument('--device', default='cuda')
-    parser.add_argument('--seed', default=42, type=int)
+    parser.add_argument('--seed', default=3407, type=int)
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://',
@@ -348,10 +340,12 @@ if __name__ == '__main__':
     config = utils.AttrDict(config)
     args = utils.AttrDict(args.__dict__)
     config.update(args)
+    utils.init_distributed_mode(config)
 
     print("all global configuration is here:\n", config)
     if utils.is_main_process():
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
         yaml.dump(dict(config), open(os.path.join(
             config.output_dir, 'global_config.yaml'), 'w'))
+    
     main(config)

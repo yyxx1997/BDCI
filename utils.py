@@ -1,5 +1,5 @@
 import numpy as np
-import io
+import random
 import os
 import time
 from collections import defaultdict, deque
@@ -258,8 +258,8 @@ def init_distributed_mode(args):
     setup_for_distributed(args.rank == 0)
 
 @torch.no_grad()
-def concat_all_gather(tensor,dist=True):
-    if dist:
+def concat_all_gather(tensor):
+    if is_dist_avail_and_initialized():
         """
         Performs all_gather operation on the provided tensors.
         *** Warning ***: torch.distributed.all_gather has no gradient.
@@ -273,3 +273,21 @@ def concat_all_gather(tensor,dist=True):
     else :
         return tensor
         
+def setup_seed(seed=3407):
+    # fix the seed for reproducibility, more details see:
+    # https://www.zhihu.com/search?type=content&q=3407
+    # https://blog.csdn.net/zxyhhjs2017/article/details/91348108
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    # seed = seed + get_rank()
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    np.random.seed(seed)
+    random.seed(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = False
+    ...

@@ -25,12 +25,12 @@ class normal_dataset(Dataset):
 
         ann = self.ann[index]
         title = ann['title']
-        assignee = ann['assignee']
+        # assignee = ann['assignee']
         abstract = ann['abstract']
         label_id = int(ann['label_id']) if 'label_id' in ann.keys() else -1
         order = int(ann['order'])
 
-        assemble_text = "这份专利的标题为：《{}》，由“{}”公司申请，详细说明如下：{}".format(
-            title, assignee, abstract)[:self.max_words]
+        assemble_text = "这份专利的标题为：《{}》，详细说明如下：{}".format(
+            title, abstract)[:self.max_words]
 
         return assemble_text, order, label_id

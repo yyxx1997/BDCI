@@ -7,13 +7,13 @@ bert_config: 'output/bert-base-chinese' # or replace with just 'bert-base-chines
 batch_size_train: 8 
 batch_size_test: 256 
 
-r_drop: 0
+r_drop: 3
 warm_up: False
-optimizer: {opt: adamW, lr: 2e-5, weight_decay: 0.02}
-schedular: {sched: cosine, lr: 2e-5, epochs: 20, min_lr: 1e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
+optimizer: {opt: adamW, lr: 5e-5, weight_decay: 0.02}
+schedular: {sched: cosine, lr: 5e-5, epochs: 50, min_lr: 1e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
 
 # Evaluation Metrics
-metrics: ['accuracy','precision','recall','F-1']
+metrics: ['F-1']
 
 
 
