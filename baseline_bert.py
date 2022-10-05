@@ -1,10 +1,8 @@
 import argparse
 import os
-import ruamel.yaml as yaml
 import time
 import datetime
 import json
-from pathlib import Path
 import json
 import torch
 import torch.distributed as dist
@@ -21,7 +19,7 @@ from optim import create_optimizer
 
 
 
-def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, optimizer, tokenizer, device, lr_scheduler, config):
+def training_loop(model, model_without_ddp, train_loader, val_loader, test_loader, optimizer, tokenizer, device, lr_scheduler):
 
     max_epoch = config['schedular']['epochs']
     warmup_steps = config['schedular']['warmup_epochs']
@@ -30,8 +28,7 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
     metrics = config['metrics']
     r_drop_rate = config['r_drop']
     best_scores = {}
-    for metric in metrics:
-        best_scores[metric] = -9999
+    for metric in metrics: best_scores[metric] = None
     best_step = 0
     total_step = 0
     print_freq = 50
@@ -40,17 +37,17 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
     K = config.gradient_accumulation_steps
     total_train_batch_size = config['batch_size_train'] * K * config.world_size
 
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(logging=logger.info, delimiter=" - - ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=50, fmt='{value:.6f}'))
     metric_logger.add_meter('loss', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
 
-    print("Start training")
-    print("***** Running training *****")
-    print(f"  Num examples = {len(train_loader.dataset)}")
-    print(f"  Num Epochs = {config.schedular['epochs']}")
-    print(f"  Instantaneous batch size per device = {config['batch_size_train']}")
-    print(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size}")
-    print(f"  Gradient Accumulation steps = {config.gradient_accumulation_steps}")
+    logger.info("Start training")
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_loader.dataset)}")
+    logger.info(f"  Num Epochs = {config.schedular['epochs']}")
+    logger.info(f"  Instantaneous batch size per device = {config['batch_size_train']}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {config.gradient_accumulation_steps}")
     start_time = time.time()
 
     for epoch in range(0, max_epoch):
@@ -89,10 +86,10 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
 
             if epoch == 0 and i % step_size == 0 and i <= warmup_iterations:
                 lr_scheduler.step(i//step_size)
-            
+
             if total_step % logging_step == 0:
-                val_stats, _ = evaluate(model, val_loader, tokenizer, device, config)
-                test_stats, test_prediction = evaluate(model, test_loader,tokenizer, device, config)
+                val_stats, _ = evaluate(model, val_loader, tokenizer, device)
+                test_stats, test_prediction = evaluate(model, test_loader,tokenizer, device)
 
                 if utils.is_main_process():
                     # logging statements
@@ -120,7 +117,7 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
                     for metric_name, score in best_scores.items():
                         assert metric_name in val_stats.keys(), "Metrics not exist..."
                         current_score = val_stats[metric_name]
-                        if float(current_score) > score:
+                        if score is None or float(current_score) > score:
                             torch.save(save_obj, os.path.join(output_dir, f'checkpoint_{metric_name}_best.pth'))
                             with open(os.path.join(output_dir, f"testset_{metric_name}_best.json"), "w") as f:
                                 f.write(json.dumps(test_prediction, ensure_ascii=False, indent=4))
@@ -134,10 +131,10 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
 
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
-        print("Averaged stats:", metric_logger.global_avg())
-        train_stats = {k: "{:.6f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}
-        val_stats, _ = evaluate(model, val_loader, tokenizer, device, config)
-        test_stats, test_prediction = evaluate(model, test_loader, tokenizer, device, config)
+        logger.info("Averaged stats: {}".format(metric_logger.summary(mode="avg")))
+        train_stats = {k: "{:.6f}".format(meter.avg) for k, meter in metric_logger.meters.items()}
+        val_stats, _ = evaluate(model, val_loader, tokenizer, device)
+        test_stats, test_prediction = evaluate(model, test_loader, tokenizer, device)
 
         if utils.is_main_process():
 
@@ -163,28 +160,28 @@ def train_net(model, model_without_ddp, train_loader, val_loader, test_loader, o
             for metric_name, score in best_scores.items():
                 assert metric_name in val_stats.keys(), "Metrics not exist..."
                 current_score = val_stats[metric_name]
-                if float(current_score) > score:
+                if score is None or float(current_score) > score:
                     torch.save(save_obj, os.path.join(output_dir, f'checkpoint_{metric_name}_best.pth'))
                     with open(os.path.join(output_dir, f"testset_{metric_name}_best.json"), "w") as f:
                         f.write(json.dumps(test_prediction, ensure_ascii=False, indent=4))
                     best_scores[metric_name] = float(current_score)
                     best_step = total_step
-    
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    logger.info('Training time {}'.format(total_time_str))
     training_statis = {
-        "best_step":best_step,
-        "best_scores":best_scores
+        "best_step": best_step,
+        "best_scores": best_scores
     }
     return training_statis
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, tokenizer, device, config):
+def evaluate(model, data_loader, tokenizer, device):
     # test
     model.eval()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter=" - - ")
     header = 'Evaluation:'
     print_freq = 50
     predictions = []
@@ -206,10 +203,10 @@ def evaluate(model, data_loader, tokenizer, device, config):
     orders = torch.cat(orders)
     _, pred_class = predictions.max(1)
 
-    accuracy = accuracy_score(pred_class,goldens)
-    precision = precision_score(goldens,pred_class,average='macro')
-    recall = recall_score(goldens,pred_class,average='macro')
-    F1 = f1_score(goldens,pred_class,average='macro')
+    accuracy = accuracy_score(pred_class, goldens)
+    precision = precision_score(goldens, pred_class, average='macro')
+    recall = recall_score(goldens, pred_class, average='macro')
+    F1 = f1_score(goldens, pred_class, average='macro')
 
     print("evaluation dataset size is ", goldens.size(0))
     print("Averaged stats accuracy:", accuracy)
@@ -222,7 +219,7 @@ def evaluate(model, data_loader, tokenizer, device, config):
         'recall': recall.item(),
         'F-1': F1.item()
     }
-    
+
     id2data = data_loader.dataset.id2data
     predict_result = []
     for order, pred in zip(orders.tolist(), pred_class.tolist()):
@@ -233,9 +230,9 @@ def evaluate(model, data_loader, tokenizer, device, config):
     return eval_result, predict_result
 
 
-def data_prepare(config):
+def data_prepare():
 
-    print("\n-------------\nCreating dataset\n-------------\n")
+    logger.info("- - - - - - - - - - - - - Creating dataset- - - - - - - - - - - - - ")
     datasets = create_dataset('normal', config)
     if config.distributed:
         num_tasks = utils.get_world_size()
@@ -253,9 +250,9 @@ def data_prepare(config):
     return train_loader, val_loader, test_loader
 
 
-def model_prepare(config, device):
+def model_prepare(device):
 
-    print("\n-------------\nCreating model\n-------------\n")
+    logger.info("- - - - - - - - - - - - - Creating model- - - - - - - - - - - - - ")
     model = BaselineBert(config=config, text_encoder=config.bert_config)
 
     if config.checkpoint:
@@ -266,7 +263,6 @@ def model_prepare(config, device):
         print(msg)
 
     model = model.to(device)
-
     model_without_ddp = model
     if config.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -276,18 +272,15 @@ def model_prepare(config, device):
     return model, model_without_ddp
 
 
-def main(config):
-    
-    # fix the seed for reproducibility
-    utils.setup_seed(config.seed)
+def main():
 
     #### Dataset ####
-    train_loader, val_loader, test_loader = data_prepare(config)
+    train_loader, val_loader, test_loader = data_prepare()
 
     #### Model ####
     device = torch.device(config.device)
     tokenizer = BertTokenizer.from_pretrained(config.bert_config)
-    model, model_without_ddp = model_prepare(config, device)
+    model, model_without_ddp = model_prepare(device)
 
     #### Training Controler ####
     arg_opt = utils.AttrDict(config['optimizer'])
@@ -296,9 +289,11 @@ def main(config):
     lr_scheduler, _ = create_scheduler(arg_sche, optimizer)
 
     if config.eval_before_train:
-        val_stats, _ = evaluate(model, val_loader, tokenizer, device, config)
-        test_stats, _ = evaluate(model, test_loader, tokenizer, device, config)
-    training_statis = train_net(model, model_without_ddp, train_loader, val_loader, test_loader, optimizer, tokenizer, device, lr_scheduler, config)
+        val_stats, _ = evaluate(model, val_loader, tokenizer, device)
+        test_stats, _ = evaluate(model, test_loader, tokenizer, device)
+    training_statis = training_loop(model, model_without_ddp, train_loader,
+                                val_loader, test_loader, optimizer, tokenizer,
+                                device, lr_scheduler)
 
     if utils.is_main_process():
         with open(os.path.join(args.output_dir, "log.txt"), "a") as f:
@@ -329,23 +324,28 @@ def parse_args():
     parser.add_argument('--logging_step', default=1000, type=int) 
     parser.add_argument('--save_every_checkpoint', action='store_true')
     parser.add_argument('--save_every_epoch', action='store_true')
+    parser.add_argument('--logging_level', type=str, choices=['DEBUG','INFO','ERROR','WARNING'], default='DEBUG')
     args = parser.parse_args()
     return args
 
 
 if __name__ == '__main__':
+
     # set configuration for training or evaluating
     args = parse_args()
-    config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
+    config = utils.read_yaml(args.config)
     config = utils.AttrDict(config)
     args = utils.AttrDict(args.__dict__)
+    # The parameters passed in from the command line take precedence
     config.update(args)
-    utils.init_distributed_mode(config)
 
-    print("all global configuration is here:\n", config)
-    if utils.is_main_process():
-        Path(config.output_dir).mkdir(parents=True, exist_ok=True)
-        yaml.dump(dict(config), open(os.path.join(
-            config.output_dir, 'global_config.yaml'), 'w'))
-    
-    main(config)
+    # Determine global parameters and settings
+    utils.init_distributed_mode(config)
+    # fix the seed for reproducibility
+    utils.setup_seed(config.seed)
+    # record them in file.
+    logger = utils.create_logger(config)
+
+    logger.debug(f"all global configuration is here: {str(config)}")
+
+    main()

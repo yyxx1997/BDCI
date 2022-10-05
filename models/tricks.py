@@ -68,7 +68,7 @@ class MultiCEFocalLoss(torch.nn.Module):
         if alpha is None:
             self.alpha = Variable(torch.ones(class_num, 1))
         else:
-            self.alpha = alpha
+            self.alpha = torch.Tensor(alpha) if type(alpha) is list else alpha
         self.gamma = gamma
         self.reduction = reduction
         self.class_num =  class_num

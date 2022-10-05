@@ -1,2 +1,0 @@
-# BDCI
-Repo for competition.

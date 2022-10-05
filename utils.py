@@ -7,6 +7,100 @@ import datetime
 
 import torch
 import torch.distributed as dist
+import logging
+import logging.config
+from pathlib import Path
+import ruamel.yaml as yaml
+
+
+def read_yaml(path):
+    config = yaml.load(open(path, 'r'), Loader=yaml.Loader)
+    return config
+
+def compose_new_attr(logger, logging_level, is_master=False):
+
+    logging_origin = logger.__getattribute__(logging_level)
+
+    def dist_logger(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            logging_origin(*args, **kwargs)
+
+    logger.__setattr__(logging_level, dist_logger)
+
+
+def setup_for_distributed_logger(logger, is_master=False):
+    """
+    This function disables logging when not in master process
+    """
+    levelToName = {50: 'CRITICAL', 40: 'ERROR', 30: 'WARNING', 20: 'INFO', 10: 'DEBUG'}
+    for level, name in levelToName.items():
+        compose_new_attr(logger, name.lower(), is_master)
+
+
+def create_logger(config):
+    """
+    This function is responsible for creating the log folder,and returning the class used for logging operations.
+    The log file is recorded according to the timing, and records each training process independently.
+    https://zhuanlan.zhihu.com/p/476549020
+    https://blog.csdn.net/dadaowuque/article/details/104527196
+    https://www.cnblogs.com/liqi175/p/16557213.html
+
+    args:
+    --------
+        config -> config dictionary which contains goal path and setting.
+    
+    returns:
+    --------
+        logger -> a handler that can perform log operations;
+        # sub_output_path -> final output directory depend on timestamp.
+
+    goal:
+    --------
+        /root -> name according to settings
+
+            /sub_root -> name according to timing
+            
+                /checkpoints -> big files
+                    ...
+
+                tensorboard.logs
+
+                example.log
+
+                global_config.yaml
+            ...
+    """
+
+    output_path = os.path.join(config.output_dir, time.strftime('%Y-%m-%d-%H-%M'))
+    ckpt_output_path = os.path.join(output_path, 'checkpoints')
+    config.output_dir = output_path
+
+    if is_main_process():
+        Path(output_path).mkdir(parents=True, exist_ok=True)
+        Path(ckpt_output_path).mkdir(parents=True, exist_ok=True)
+        yaml.dump(dict(config), open(os.path.join(config.output_dir, 'global_config.yaml'), 'w'))
+
+    if is_dist_avail_and_initialized():
+        torch.distributed.barrier()
+
+    log_file = 'train.log'
+    head = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    formatter = logging.Formatter(head)
+    logger = logging.getLogger()
+    fh = logging.FileHandler(os.path.join(output_path, log_file))
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    fh.setFormatter(formatter)
+    logging_level = getattr(logging, config.logging_level, logging.DEBUG)
+    ch.setLevel(logging_level)
+    fh.setLevel(logging_level)
+    logger.addHandler(ch)
+    logger.addHandler(fh)
+    logger.setLevel(logging_level)
+
+    setup_for_distributed_logger(logger, is_master=is_main_process())
+    return logger
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -71,9 +165,10 @@ class SmoothedValue(object):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, logging=None, delimiter="\t"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.logging = logging if logging else print
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -98,13 +193,26 @@ class MetricLogger(object):
             )
         return self.delimiter.join(loss_str)
 
-    def global_avg(self):
-        loss_str = []
+    def summary(self, mode="avg"):
+        """
+        Determine how to count the variables in meters by specifying the mode.
+        My annotation is of a kind of very exhautive numpydoc format docstring. 
+        See: https://zhuanlan.zhihu.com/p/344543685
+
+        args:
+        --------
+            mode -> ["avg", "global_avg", "max", "median", "total", "value"], Optional, by default "avg"
+                    
+        return:
+        --------
+            A summary string for multiple variables in MetricLogger.
+        """
+        summary_str = []
         for name, meter in self.meters.items():
-            loss_str.append(
-                "{}: {:.4f}".format(name, meter.global_avg)
+            summary_str.append(
+                "{}: {:.4f}".format(name, getattr(meter, mode))
             )
-        return self.delimiter.join(loss_str)    
+        return self.delimiter.join(summary_str)    
     
     def synchronize_between_processes(self):
         for meter in self.meters.values():
@@ -142,13 +250,13 @@ class MetricLogger(object):
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
                 if torch.cuda.is_available():
-                    print(log_msg.format(
+                    self.logging(log_msg.format(
                         i, len(iterable), eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
                         memory=torch.cuda.max_memory_allocated() / MB))
                 else:
-                    print(log_msg.format(
+                    self.logging(log_msg.format(
                         i, len(iterable), eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time)))
@@ -156,7 +264,7 @@ class MetricLogger(object):
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(
+        self.logging('{} Total time: {} ({:.4f} s / it)'.format(
             header, total_time_str, total_time / len(iterable)))
         
 
