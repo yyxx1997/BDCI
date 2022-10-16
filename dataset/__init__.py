@@ -3,12 +3,12 @@ from torch.utils.data import DataLoader
 from dataset.dataset import normal_dataset
 
 
-def create_dataset(dataset, config):
+def create_dataset(dataset, config, tokenizer):
     
     if dataset=='normal':   
-        train_dataset = normal_dataset(config['train_file'])  
-        val_dataset = normal_dataset(config['val_file'])  
-        test_dataset = normal_dataset(config['test_file'])                
+        train_dataset = normal_dataset(config['train_file'], tokenizer)  
+        val_dataset = normal_dataset(config['val_file'], tokenizer)  
+        test_dataset = normal_dataset(config['test_file'], tokenizer)                
         return train_dataset, val_dataset, test_dataset     
 
 

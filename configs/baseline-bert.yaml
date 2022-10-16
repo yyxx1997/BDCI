@@ -4,8 +4,8 @@ test_file: 'data/testA_format.json'
 category: 36
 bert_config: 'output/bert-base-chinese' # or replace with just 'bert-base-chinese'
 
-batch_size_train: 16 
-batch_size_test: 256 
+batch_size_train: 4 
+batch_size_test: 16 
 
 r_drop: 0
 warm_up: False

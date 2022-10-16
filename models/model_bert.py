@@ -18,14 +18,18 @@ class BaselineBert(nn.Module):
             nn.Linear(self.text_encoder.config.hidden_size, config['category'])
         )
 
-    def forward(self, text, targets=None, train=True):
+    def forward(self, batch):
 
-        output = {}
-        textual_resp = self.text_encoder(text.input_ids,attention_mask=text.attention_mask,return_dict=True)
+        text = batch['text']
+        targets = batch['label']
+
+        textual_resp = self.text_encoder(text.input_ids,attention_mask=text.attention_mask, return_dict=True)
         te_hiddens = textual_resp.last_hidden_state[:, 0, :]
         prediction = self.textual_cls_head(te_hiddens)
+        
+        output = {}
         output['prediction'] = prediction
-        if train:
+        if self.training:
             loss = self.focal_loss(prediction, targets)
             output['loss'] = loss
         return output

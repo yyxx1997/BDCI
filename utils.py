@@ -4,13 +4,14 @@ import os
 import time
 from collections import defaultdict, deque
 import datetime
-
+import json
 import torch
 import torch.distributed as dist
 import logging
 import logging.config
 from pathlib import Path
 import ruamel.yaml as yaml
+import shutil
 
 
 def read_yaml(path):
@@ -75,6 +76,7 @@ def create_logger(config):
     output_path = os.path.join(config.output_dir, time.strftime('%Y-%m-%d-%H-%M'))
     ckpt_output_path = os.path.join(output_path, 'checkpoints')
     config.output_dir = output_path
+    config.ckpt_output_path = ckpt_output_path
 
     if is_main_process():
         Path(output_path).mkdir(parents=True, exist_ok=True)
@@ -85,7 +87,7 @@ def create_logger(config):
         torch.distributed.barrier()
 
     log_file = 'train.log'
-    head = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    head = '%(asctime)s - %(levelname)s - %(message)s'
     formatter = logging.Formatter(head)
     logger = logging.getLogger()
     fh = logging.FileHandler(os.path.join(output_path, log_file))
@@ -145,7 +147,7 @@ class SmoothedValue(object):
 
     @property
     def global_avg(self):
-        return self.total / self.count
+        return self.total / (self.count + 1e-6)
 
     @property
     def max(self):
@@ -154,6 +156,10 @@ class SmoothedValue(object):
     @property
     def value(self):
         return self.deque[-1]
+
+    @property
+    def empty(self):
+        return self.deque.__len__() == 0
 
     def __str__(self):
         return self.fmt.format(
@@ -221,12 +227,9 @@ class MetricLogger(object):
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq=50, header=None):
         i = 0
-        if not header:
-            header = ''
-        start_time = time.time()
-        end = time.time()
+        header = header if header else ''
         iter_time = SmoothedValue(fmt='{avg:.4f}')
         data_time = SmoothedValue(fmt='{avg:.4f}')
         space_fmt = ':' + str(len(str(len(iterable)))) + 'd'
@@ -235,32 +238,39 @@ class MetricLogger(object):
             '[{0' + space_fmt + '}/{1}]',
             'eta: {eta}',
             '{meters}',
-            'time: {time}',
-            'data: {data}'
+            'step: {time} s',
+            'item: {data} s'
         ]
         if torch.cuda.is_available():
-            log_msg.append('max mem: {memory:.0f}')
+            log_msg.append('memory: {memory:.0f}/MB')
         log_msg = self.delimiter.join(log_msg)
         MB = 1024.0 * 1024.0
+        start_time = time.time()
+        end = time.time()
         for obj in iterable:
             data_time.update(time.time() - end)
-            yield obj
-            iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+            i += 1
+            if i == 1 or i % print_freq == 0 or i == len(iterable):
+                if iter_time.empty:
+                    eta_string = iter_time_str = meters = None
+                else:
+                    eta_seconds = iter_time.global_avg * (len(iterable) - i)
+                    eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                    iter_time_str = str(iter_time)
+                    meters = str(self)
                 if torch.cuda.is_available():
                     self.logging(log_msg.format(
                         i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
+                        meters=meters,
+                        time=iter_time_str, data=str(data_time),
                         memory=torch.cuda.max_memory_allocated() / MB))
                 else:
                     self.logging(log_msg.format(
                         i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
-            i += 1
+                        meters=meters,
+                        time=iter_time_str, data=str(data_time)))
+            yield obj
+            iter_time.update(time.time() - end)
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -399,3 +409,33 @@ def setup_seed(seed=3407):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.enabled = False
     ...
+
+def prepare_input(data, device):
+    """
+    Prepares one `data` before feeding it to the model, be it a tensor or a nested list/dictionary of tensors.
+    Copy from huggingface trainer.py
+    """
+    from collections.abc import Mapping
+    if isinstance(data, Mapping):
+        return AttrDict(type(data)({k: prepare_input(v, device) for k, v in data.items()}))
+    elif isinstance(data, (tuple, list)):
+        return type(data)(prepare_input(v) for v in data)
+    elif isinstance(data, torch.Tensor):
+        return data.to(device, non_blocking=True)
+    return data
+
+def copy_whole_dir(source_path, target_path):
+
+    if not os.path.exists(target_path):
+        Path(target_path).mkdir(parents=True, exist_ok=True)
+
+    if os.path.exists(source_path):
+        shutil.rmtree(target_path)
+    
+    shutil.copytree(source_path, target_path)
+
+def write_json(target_path, target_name, json_file):
+
+    Path(target_path).mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(target_path, f"{target_name}.json"), "w") as f:
+        f.write(json.dumps(json_file, ensure_ascii=False, indent=4))
