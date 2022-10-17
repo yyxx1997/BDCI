@@ -48,8 +48,8 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
     total_train_batch_size = batch_size_train * K * config.world_size
 
     metric_logger = utils.MetricLogger(logging=logger.info, delimiter=" - ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=50, fmt='{value:.6f}'))
-    metric_logger.add_meter('loss', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=5, fmt='{value:.6f}'))
+    metric_logger.add_meter('loss', utils.SmoothedValue(window_size=5, fmt='{value:.6f}'))
 
     logger.info("Start training")
     logger.info("***** Running training *****")
@@ -61,7 +61,7 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
     start_time = time.time()
 
     for epoch in range(1, max_epoch+1):
-        logger.info("- " * 40)
+        logger.info(" -" * 20 + "Start of [{}/{}]".format(epoch, max_epoch) + " - " * 20)
         header = 'Train Epoch: [{}/{}]'.format(epoch, max_epoch)
         if config.distributed:
             train_loader.sampler.set_epoch(epoch)
@@ -97,6 +97,8 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
             total_step += 1
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
             metric_logger.update(loss=loss.item())
+            metric_logger.synchronize_between_processes()
+            need_tb_logs = metric_logger.latest_meter(prefix='train/')
 
             if epoch == 1 and i % 100 == 0 and i <= warmup_iterations:
                 lr_scheduler.step(i//100)
@@ -120,6 +122,11 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
                              'step': i+1,
                              'total_step': total_step
                              }
+                
+                need_tb_logs.update({
+                    **{f'val/{k}': v for k, v in val_stats.items()},
+                    **{f'test/{k}': v for k, v in test_stats.items()}
+                })
 
                 save_obj = {
                     'model': model_without_ddp.state_dict(),
@@ -149,6 +156,8 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
                     for metric_name in save_evidence:
                         best_ckpt_path = os.path.join(ckpt_output_path, f"best_{metric_name}")
                         utils.copy_whole_dir(ckpt_sub_path, best_ckpt_path)
+            
+            tb_writer.add_dict_scalar(need_tb_logs, total_step)
 
         lr_scheduler.step(epoch+warmup_steps+1)
         if utils.is_dist_avail_and_initialized():
@@ -158,7 +167,6 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
         logger.info("Averaged stats: {}".format(metric_logger.summary(mode="avg")))
-        logger.info("- " * 40)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -167,12 +175,11 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
 
 
 @torch.no_grad()
-def evaluate(model, data_loader):
+def evaluate(model, data_loader, special_name="Val"):
     # test
-    logger.info("- " * 20)
     model.eval()
     metric_logger = utils.MetricLogger(logging=logger.info, delimiter=" - ")
-    header = 'Evaluation:'
+    header = 'Evaluation: ' + special_name
     print_freq = 20
     predictions = []
     goldens = []
@@ -206,7 +213,7 @@ def evaluate(model, data_loader):
     }
 
     for metric, res in eval_result.items():
-        logger.info("Averaged {} is {}.".format(metric, res))
+        logger.info(special_name + " Averaged {} is {}.".format(metric, res))
 
     id2data = data_loader.dataset.id2data
     predict_result = []
@@ -214,7 +221,7 @@ def evaluate(model, data_loader):
         item = id2data[order]
         item['prediction'] = pred
         predict_result.append(item)
-    logger.info("- " * 40)
+
     return eval_result, predict_result
 
 
@@ -330,8 +337,10 @@ if __name__ == '__main__':
     # fix the seed for reproducibility
     utils.setup_seed(config.seed)
     # record them in file.
-    logger = utils.create_logger(config)
+    logger, tb_writer = utils.create_logger(config)
 
     logger.debug(f"all global configuration is here: {str(config)}")
 
     main()
+
+    tb_writer.close()

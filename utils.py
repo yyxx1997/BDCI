@@ -12,6 +12,7 @@ import logging.config
 from pathlib import Path
 import ruamel.yaml as yaml
 import shutil
+from torch.utils.tensorboard import SummaryWriter
 
 
 def read_yaml(path):
@@ -86,6 +87,8 @@ def create_logger(config):
     if is_dist_avail_and_initialized():
         torch.distributed.barrier()
 
+    tb_writer = tbWriter(output_path)
+
     log_file = 'train.log'
     head = '%(asctime)s - %(levelname)s - %(message)s'
     formatter = logging.Formatter(head)
@@ -102,7 +105,7 @@ def create_logger(config):
     logger.setLevel(logging_level)
 
     setup_for_distributed_logger(logger, is_master=is_main_process())
-    return logger
+    return logger, tb_writer
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -216,10 +219,17 @@ class MetricLogger(object):
         summary_str = []
         for name, meter in self.meters.items():
             summary_str.append(
-                "{}: {:.4f}".format(name, getattr(meter, mode))
+                "{}: {}".format(name, getattr(meter, mode))
             )
         return self.delimiter.join(summary_str)    
     
+    def latest_meter(self, prefix=''):
+        latest = {}
+        for name, meter in self.meters.items():
+            latest.update({prefix + name : getattr(meter, "value")})
+        return latest
+
+
     def synchronize_between_processes(self):
         for meter in self.meters.values():
             meter.synchronize_between_processes()
@@ -439,3 +449,21 @@ def write_json(target_path, target_name, json_file):
     Path(target_path).mkdir(parents=True, exist_ok=True)
     with open(os.path.join(target_path, f"{target_name}.json"), "w") as f:
         f.write(json.dumps(json_file, ensure_ascii=False, indent=4))
+
+class tbWriter:
+
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.writer = SummaryWriter(log_dir=self.output_dir) 
+
+    def add_scalar(self, name,  value, step):
+        if not is_main_process():
+            return
+        self.writer.add_scalar(name, value, step)
+
+    def add_dict_scalar(self, dct_var, step):
+        for k, v in dct_var.items():
+            self.add_scalar(k, v, step)
+
+    def close(self):
+        self.writer.close()
