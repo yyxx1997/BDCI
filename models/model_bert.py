@@ -27,9 +27,13 @@ class BaselineBert(nn.Module):
         te_hiddens = textual_resp.last_hidden_state[:, 0, :]
         prediction = self.textual_cls_head(te_hiddens)
         
-        output = {}
-        output['prediction'] = prediction
+        loss = None
         if self.training:
             loss = self.focal_loss(prediction, targets)
-            output['loss'] = loss
+        else:
+            loss = F.cross_entropy(prediction, targets, ignore_index=-1)
+
+        output = {}
+        output['prediction'] = prediction
+        output['loss'] = loss
         return output

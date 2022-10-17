@@ -390,6 +390,7 @@ def concat_all_gather(tensor):
     if is_dist_avail_and_initialized():
         """
         Performs all_gather operation on the provided tensors.
+        https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
         *** Warning ***: torch.distributed.all_gather has no gradient.
         """
         tensors_gather = [torch.ones_like(tensor)

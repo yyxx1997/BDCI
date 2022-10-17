@@ -172,6 +172,7 @@ def training_loop(model, model_without_ddp, train_loader, val_loader, test_loade
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('***** Stopping training *****')
     logger.info('Training time {}'.format(total_time_str))
+    tb_writer.close()
 
 
 @torch.no_grad()
@@ -182,20 +183,27 @@ def evaluate(model, data_loader, special_name="Val"):
     header = 'Evaluation: ' + special_name
     print_freq = 20
     predictions = []
+    losses = []
     goldens = []
     orders = []
     for i, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         batch = utils.prepare_input(batch, device)
         outputs = model(batch)
+        loss = outputs['loss']
         prediction = outputs['prediction']
+        
         prediction = utils.concat_all_gather(prediction).to('cpu')
+        loss = utils.concat_all_gather(loss.unsqueeze(0)).to('cpu')
         targets = utils.concat_all_gather(batch.label).to('cpu')
         order = utils.concat_all_gather(batch.order).to('cpu')
+        
         predictions.append(prediction)
+        losses.append(loss) 
         goldens.append(targets)
         orders.append(order)
 
     predictions = torch.cat(predictions)
+    losses = torch.cat(losses)
     goldens = torch.cat(goldens)
     orders = torch.cat(orders)
     _, pred_class = predictions.max(1)
@@ -209,7 +217,8 @@ def evaluate(model, data_loader, special_name="Val"):
         'accuracy': accuracy.item(),
         'precision': precision.item(),
         'recall': recall.item(),
-        'F-1': F1.item()
+        'F-1': F1.item(),
+        'loss': losses.mean().item()
     }
 
     for metric, res in eval_result.items():
@@ -342,5 +351,3 @@ if __name__ == '__main__':
     logger.debug(f"all global configuration is here: {str(config)}")
 
     main()
-
-    tb_writer.close()
