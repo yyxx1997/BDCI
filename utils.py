@@ -134,9 +134,11 @@ class SmoothedValue(object):
         t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
         dist.barrier()
         dist.all_reduce(t)
+        t /= get_world_size()
         t = t.tolist()
-        self.count = int(t[0])
-        self.total = t[1]
+        count, total = t
+        self.count = int(count)
+        self.total = total
 
     @property
     def median(self):
