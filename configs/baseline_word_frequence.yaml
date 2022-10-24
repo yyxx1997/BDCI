@@ -1,0 +1,6 @@
+train_file: 'data/cws_train_862.json'
+val_file: 'data/cws_test_96.json'                               
+test_file: 'data/cws_testA_format.json'
+category: 36
+
+cache: '/data1/yx/suda/BDCI/output/cache/category.json'
